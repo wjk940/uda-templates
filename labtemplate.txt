@@ -1,0 +1,195 @@
+# vSphere 5.5/6.0 Unattended Silent Installation Script - ks.cfg
+# based on work by Dean.Colpitts@mitg.ca / 2011.09.28, http://www.mikelaverick.com,
+# and http://www.virtuallyghetto.com
+# Note all options are preceded by a double dash
+# This file must be in UNIX format so do not use Windows notepad to create or edit
+# This script will automatically reboot the server once the install is completed and once again after the first boot
+# vSphere will say it has halted after the first boot but it will autorestart after 15 seconds, so do not panic
+
+vmaccepteula
+
+rootpw somepassword
+
+%include /tmp/installcmd
+
+# Setup networking on vmnic0
+# The --ip will end up being the IP address of your service console.
+network --device=vmnic0 --bootproto=static --ip=[SERV_IP] --netmask=255.255.254.0 --gateway=10.0.6.1 --nameserver="10.0.6.1","10.0.4.3" --hostname=[HOSTNAME] --addvmportgroup=0 --vlanid=0
+
+serialnum --esx=[LICENSE]
+
+reboot --noeject
+
+%pre --interpreter=busybox
+
+if [ [ENABLE_VSAN] = true ]
+then
+	echo "clearpart --drives=[VSAN_DRIVES] --overwritevmfs" > /tmp/installcmd
+	echo "install --firstdisk=usb --overwritevmfs --novmfsondisk" >> /tmp/installcmd
+else
+	echo "clearpart --alldrives --overwritevmfs" > /tmp/installcmd
+	echo "install --firstdisk=local --overwritevmfs" >> /tmp/installcmd
+fi
+
+%firstboot --interpreter=busybox
+
+## - Put host into maintenance mode - and wait for task to complete
+vim-cmd hostsvc/maintenance_mode_enter
+vsleep 5
+
+VSAN_ENABLED=[ENABLE_VSAN]
+PNICS=[pNICS]
+if [ ${VSAN_ENABLED} = true ]
+then
+	case ${PNICS} in
+		3)
+			UPLINKS_DEFAULT="--active-uplinks=vmnic0,vmnic1 --standby-uplinks=vmnic2"
+			UPLINKS_COMPLEMENT="--active-uplinks=vmnic2 --standby-uplinks=vmnic0,vmnic1"
+			UPLINKS_ALL_ACTIVE="--active-uplinks=vmnic0,vmnic1,vmnic2"
+			;;
+		*)
+			UPLINKS_DEFAULT="--active-uplinks=vmnic0 --standby-uplinks=vmnic1"
+			UPLINKS_COMPLEMENT="--active-uplinks=vmnic1 --standby-uplinks=vmnic0"
+			UPLINKS_ALL_ACTIVE="--active-uplinks=vmnic0,vmnic1"
+			;;
+	esac
+else
+	case ${PNICS} in
+		3)
+			UPLINKS_DEFAULT="--active-uplinks=vmnic0,vmnic1,vmnic2"
+			UPLINKS_COMPLEMENT="--active-uplinks=vmnic0,vmnic1,vmnic2"
+			UPLINKS_ALL_ACTIVE="--active-uplinks=vmnic0,vmnic1,vmnic2"
+			;;
+		*)
+			UPLINKS_DEFAULT="--active-uplinks=vmnic0,vmnic1"
+			UPLINKS_COMPLEMENT="--active-uplinks=vmnic0,vmnic1"
+			UPLINKS_ALL_ACTIVE="--active-uplinks=vmnic0,vmnic1"
+			;;
+	esac
+fi
+
+## - Further configuration of DNS...
+esxcli system hostname set --domain=[DOMAIN] --host=[HOSTNAME]
+esxcli network ip dns server add --server=10.0.6.1
+esxcli network ip dns server add --server=10.0.4.3
+esxcli network ip dns search add --domain=[DOMAIN]
+
+# enable & start remote ESXi Shell (SSH)
+vim-cmd hostsvc/enable_ssh
+vim-cmd hostsvc/start_ssh
+
+# enable & start ESXi Shell (TSM)
+vim-cmd hostsvc/enable_esx_shell
+vim-cmd hostsvc/start_esx_shell
+
+# supress ESXi Shell shell warning
+esxcli system settings advanced set -o /UserVars/SuppressShellWarning -i 1
+esxcli system settings advanced set -o /UserVars/ESXiShellTimeOut -i 1
+
+# Disable IPv6 for VMkernel interfaces
+esxcli system module parameters set --module tcpip4 --parameter-string ipv6=0
+
+# config vSwitch0
+esxcli network vswitch standard set --vswitch-name=vSwitch0 --mtu=9000
+esxcli network vswitch standard uplink add --uplink-name=vmnic1 --vswitch-name=vSwitch0
+if [ ${PNICS} = 3 ]
+then
+	esxcli network vswitch standard uplink add --uplink-name=vmnic2 --vswitch-name=vSwitch0
+fi
+esxcli network vswitch standard policy failover set ${UPLINKS_DEFAULT} --vswitch-name=vSwitch0
+
+
+## Create and configure VMkernel adapters
+## These will be used in vSphere Web Client, when host is added to Distributed Switch
+## Supported tags are: Management, VMotion, faultToleranceLogging, vSphereReplication, vSphereReplicationNFC, vSphereProvisioning
+## vmk0 Management Network was done by the 'network' command in the install section above, leave MTU at default for Management
+
+#esxcli network vswitch standard portgroup add --portgroup-name="Management Network" --vswitch-name=vSwitch0
+#esxcli network ip interface tag add --interface-name=vmk0 --tagname=Management
+esxcli network vswitch standard portgroup policy failover set --portgroup-name="Management Network" ${UPLINKS_ALL_ACTIVE}
+
+esxcli network vswitch standard portgroup add --portgroup-name="vMotion-PG" --vswitch-name=vSwitch0
+esxcli network ip interface add --interface-name=vmk1 --mtu=9000 --portgroup-name="vMotion-PG"
+esxcli network ip interface ipv4 set --interface-name=vmk1 --ipv4=[VMOT_IP] --netmask=255.255.254.0 --type=static
+esxcli network ip interface tag add --interface-name=vmk1 --tagname VMotion
+esxcli network vswitch standard portgroup policy failover set --portgroup-name="vMotion-PG" ${UPLINKS_ALL_ACTIVE}
+
+esxcli network vswitch standard portgroup add --portgroup-name="FT-PG" --vswitch-name=vSwitch0
+esxcli network ip interface add --interface-name=vmk2 --mtu=9000 --portgroup-name="FT-PG"
+esxcli network ip interface ipv4 set --interface-name=vmk2 --ipv4=[FT_IP] --netmask=255.255.254.0 --type=static
+esxcli network ip interface tag add --interface-name=vmk2 --tagname faultToleranceLogging
+esxcli network vswitch standard portgroup policy failover set --portgroup-name="FT-PG" ${UPLINKS_ALL_ACTIVE}
+
+if [ ${VSAN_ENABLED} = true ]
+then
+	esxcli network vswitch standard portgroup add --portgroup-name="vSAN-PG" --vswitch-name=vSwitch0
+	esxcli network ip interface add --interface-name=vmk3 --mtu=9000 --portgroup-name="vSAN-PG"
+	esxcli network ip interface ipv4 set --interface-name=vmk3 --ipv4=[VSAN_IP] --netmask=255.255.254.0 --type=static
+	esxcli network vswitch standard portgroup policy failover set --portgroup-name="vSAN-PG" ${UPLINKS_COMPLEMENT}
+	esxcli vsan network ipv4 add --interface-name=vmk3
+
+	esxcli vsan storage automode set --enabled false
+fi
+
+# add application portgroups
+APP_PORTGROUPS="10.0.4.0-23-PG 10.0.6.0-23-PG 10.0.8.0-23-PG 10.0.10.0-23-PG"
+for APP_PORTGROUP in ${APP_PORTGROUPS}
+do
+	esxcli network vswitch standard portgroup add --portgroup-name="${APP_PORTGROUP}" --vswitch-name=vSwitch0
+	esxcli network vswitch standard portgroup policy failover set --portgroup-name="${APP_PORTGROUP}" ${UPLINKS_DEFAULT}
+done
+
+### MOUNT NFS DATASTORE ###
+# might want to add fields to subtemplate
+esxcli storage nfs add --host=nasdatastore.[DOMAIN] --share=/nfs/NFS-A-datastore --volume-name=NFS-A-datastore
+
+# Generate a new scratch directory for this host on a Datastore
+scratchdirectory=/vmfs/volumes/NFS-A-datastore/.locker-$(hostname 2> /dev/null)-$(esxcfg-info -b 2> /dev/null)
+
+# Create the scratch directory
+mkdir -p $scratchdirectory/installlogs
+
+
+# Change the advanced configuration option
+vim-cmd hostsvc/advopt/update ScratchConfig.ConfiguredScratchLocation string $scratchdirectory
+esxcli system coredump partition set --enable true --smart
+
+## - No ESXCLI command exists for adding and starting an NTP server
+### NTP CONFIGURATIONS ###
+cat > /etc/ntp.conf << __NTP_CONFIG__
+restrict default kod nomodify notrap noquerynopeer
+restrict 127.0.0.1
+server 0.us.pool.ntp.org
+server 1.us.pool.ntp.org
+server 2.us.pool.ntp.org
+server 3.us.pool.ntp.org
+__NTP_CONFIG__
+/sbin/chkconfig ntpd on
+
+### FIREWALL CONFIGURATION ###
+
+# enable firewall
+esxcli network firewall set --default-action=false --enabled=yes
+
+# services to enable by default
+FIREWALL_SERVICES="syslog sshClient ntpClient updateManager httpClient netdump"
+for SERVICE in ${FIREWALL_SERVICES}
+do
+	esxcli network firewall ruleset set --ruleset-id=${SERVICE} --enabled=yes
+done
+
+# install ESXi Embedded Host Client
+# host level GUI at http/s://[HOSTNAME].[DOMAIN]/ui
+esxcli software vib install -v https://download3.vmware.com/software/vmw-tools/esxui/esxui-signed-3976049.vib
+
+# copy %first boot script logs to persisted datastore
+cp -rL /var/log $scratchdirectory/installlogs
+
+# enter maintenance mode
+esxcli system maintenanceMode set --enable true
+
+# backup ESXi configuration to persist changes
+/sbin/auto-backup.sh
+
+# Needed for configuration changes that could not be performed in esxcli
+esxcli system shutdown reboot -d 10 -r "rebooting after host configurations"
