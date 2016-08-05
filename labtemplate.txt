@@ -180,7 +180,7 @@ done
 
 # install ESXi Embedded Host Client
 # host level GUI at http/s://[HOSTNAME].[DOMAIN]/ui
-esxcli software vib install -v https://download3.vmware.com/software/vmw-tools/esxui/esxui-signed-3976049.vib
+esxcli software vib install -v https://download3.vmware.com/software/vmw-tools/esxui/esxui-signed-4186463.vib
 
 # copy %first boot script logs to persisted datastore
 cp -rL /var/log $scratchdirectory/installlogs
