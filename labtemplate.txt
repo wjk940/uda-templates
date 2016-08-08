@@ -42,6 +42,11 @@ PNICS=[pNICS]
 if [ ${VSAN_ENABLED} = true ]
 then
 	case ${PNICS} in
+		1)
+			UPLINKS_DEFAULT="--active-uplinks=vmnic0"
+			UPLINKS_COMPLEMENT="--active-uplinks=vmnic0"
+			UPLINKS_ALL_ACTIVE="--active-uplinks=vmnic0"
+			;;
 		3)
 			UPLINKS_DEFAULT="--active-uplinks=vmnic0,vmnic1 --standby-uplinks=vmnic2"
 			UPLINKS_COMPLEMENT="--active-uplinks=vmnic2 --standby-uplinks=vmnic0,vmnic1"
@@ -55,6 +60,11 @@ then
 	esac
 else
 	case ${PNICS} in
+		1)
+			UPLINKS_DEFAULT="--active-uplinks=vmnic0"
+			UPLINKS_COMPLEMENT="--active-uplinks=vmnic0"
+			UPLINKS_ALL_ACTIVE="--active-uplinks=vmnic0"
+			;;
 		3)
 			UPLINKS_DEFAULT="--active-uplinks=vmnic0,vmnic1,vmnic2"
 			UPLINKS_COMPLEMENT="--active-uplinks=vmnic0,vmnic1,vmnic2"
@@ -91,8 +101,11 @@ esxcli system module parameters set --module tcpip4 --parameter-string ipv6=0
 
 # config vSwitch0
 esxcli network vswitch standard set --vswitch-name=vSwitch0 --mtu=9000
-esxcli network vswitch standard uplink add --uplink-name=vmnic1 --vswitch-name=vSwitch0
-if [ ${PNICS} = 3 ]
+if [ ${PNICS} -ge 2 ]
+then
+	esxcli network vswitch standard uplink add --uplink-name=vmnic1 --vswitch-name=vSwitch0
+fi
+if [ ${PNICS} -ge 3 ]
 then
 	esxcli network vswitch standard uplink add --uplink-name=vmnic2 --vswitch-name=vSwitch0
 fi
@@ -139,6 +152,12 @@ do
 	esxcli network vswitch standard portgroup policy failover set --portgroup-name="${APP_PORTGROUP}" ${UPLINKS_DEFAULT}
 done
 
+# Rename local data store
+if [ ${VSAN_ENABLED} = false ]
+then
+	vim-cmd hostsvc/datastore/rename datastore1 "datastore-[SUBTEMPLATE]"
+fi
+
 ### MOUNT NFS DATASTORE ###
 # might want to add fields to subtemplate
 esxcli storage nfs add --host=nasdatastore.[DOMAIN] --share=/nfs/NFS-A-datastore --volume-name=NFS-A-datastore
@@ -180,7 +199,7 @@ done
 
 # install ESXi Embedded Host Client
 # host level GUI at http/s://[HOSTNAME].[DOMAIN]/ui
-esxcli software vib install -v https://download3.vmware.com/software/vmw-tools/esxui/esxui-signed-4186463.vib
+esxcli software vib install -v https://download3.vmware.com/software/vmw-tools/esxui/esxui-signed-4215448.vib
 
 # copy %first boot script logs to persisted datastore
 cp -rL /var/log $scratchdirectory/installlogs
